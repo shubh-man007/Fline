@@ -48,6 +48,13 @@ type WorkFlowInit struct {
 	Steps json.RawMessage `json:"steps"`
 }
 
+type WorkFlowResponse struct {
+	ID      uuid.UUID         `json:"id"`
+	Name    string            `json:"name"`
+	Enabled bool              `json:"enabled"`
+	Steps   []json.RawMessage `json:"steps"`
+}
+
 type HTTPRequest struct {
 	Endpoint string            `json:"URL"`
 	Method   string            `json:"method"`
@@ -57,39 +64,37 @@ type HTTPRequest struct {
 	Client   *http.Client
 }
 
-func (h *HTTPRequest) Execute(ctx WorkFlowCtx) (WorkFlowCtx, error) {
-	log.Printf("Executing Workflow\n")
-	if h.Method == "GET" {
-		log.Printf("GET on %s", h.Endpoint)
-		req, err := http.NewRequest("GET", h.Endpoint, nil)
-		if err != nil {
-			log.Printf("Error sending request: %v", err.Error())
-			return ctx, err
-		}
+func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowCtx, error) {
+	log.Printf("Executing HTTP step: %s %s\n", h.Method, h.Endpoint)
 
-		for k, v := range h.Headers {
-			req.Header.Add(k, v)
-		}
-
-		res, err := h.Client.Do(req)
-		if err != nil {
-			log.Printf("Error getting response: %v", err.Error())
-			return ctx, err
-		}
-
-		defer res.Body.Close()
-		body, _ := io.ReadAll(res.Body)
-
-		var parsed WorkFlowCtx
-		if err = json.Unmarshal(body, &parsed); err != nil {
-			ctx["Result"] = string(body)
-		}
-		ctx["Result"] = parsed
-
-		return ctx, nil
+	req, err := http.NewRequestWithContext(ctx, h.Method, h.Endpoint, nil)
+	if err != nil {
+		return wfCtx, fmt.Errorf("error building request: %w", err)
 	}
 
-	return ctx, errors.New("Method not defined or incorrect format")
+	for k, v := range h.Headers {
+		req.Header.Add(k, v)
+	}
+
+	res, err := h.Client.Do(req)
+	if err != nil {
+		return wfCtx, fmt.Errorf("error executing request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return wfCtx, fmt.Errorf("error reading response body: %w", err)
+	}
+
+	var parsed WorkFlowCtx
+	if err = json.Unmarshal(body, &parsed); err != nil {
+		wfCtx["result"] = string(body)
+	} else {
+		wfCtx["result"] = parsed
+	}
+
+	return wfCtx, nil
 }
 
 type StepType string
@@ -184,24 +189,46 @@ func HealthCheck(w http.ResponseWriter, r *http.Request) {
 
 func (wf *WorkFlow) CreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	var wfReq WorkFlowInit
-	err := json.NewDecoder(r.Body).Decode(&wfReq)
+	if err := json.NewDecoder(r.Body).Decode(&wfReq); err != nil {
+		log.Printf("Error decoding request: %v\n", err)
+		errJSON(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if wfReq.Name == "" {
+		errJSON(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	if len(wfReq.Steps) == 0 {
+		errJSON(w, http.StatusBadRequest, "at least one step is required")
+		return
+	}
+
+	steps, err := ParseSteps(wfReq.Steps)
 	if err != nil {
-		log.Printf("Error creating workflow: %v\n", err.Error())
-		errJSON(w, http.StatusBadRequest, "Something went wrong")
+		log.Printf("Error parsing steps: %v\n", err)
+		errJSON(w, http.StatusBadRequest, fmt.Sprintf("invalid steps: %v", err))
 		return
 	}
 
 	wf.ID = uuid.New()
 	wf.Name = wfReq.Name
 	wf.Enabled = true
-	wf.Steps, err = ParseSteps(wfReq.Steps)
-	if err != nil {
-		log.Printf("Error parsing steps: %v\n", err.Error())
-		errJSON(w, http.StatusBadRequest, "Something went wrong")
+	wf.Steps = steps
+
+	var rawSteps []json.RawMessage
+	if err = json.Unmarshal(wfReq.Steps, &rawSteps); err != nil {
+		errJSON(w, http.StatusInternalServerError, "error processing steps")
 		return
 	}
 
-	respondJSON(w, http.StatusCreated, wf)
+	respondJSON(w, http.StatusCreated, WorkFlowResponse{
+		ID:      wf.ID,
+		Name:    wf.Name,
+		Enabled: wf.Enabled,
+		Steps:   rawSteps,
+	})
 }
 
 func (wf *WorkFlow) DisableWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -213,49 +240,49 @@ func (wf *WorkFlow) TriggerWorkflow(w http.ResponseWriter, r *http.Request) {
 	wfID, err := uuid.Parse(chi.URLParam(r, "workflowID"))
 	if err != nil {
 		log.Printf("Could not parse workflow ID: %v", err)
-		errJSON(w, http.StatusBadRequest, "Something went wrong")
+		errJSON(w, http.StatusBadRequest, "invalid workflow ID")
 		return
 	}
 
 	if wfID != wf.ID {
-		log.Printf("Incorrect trigger path: %s", r.URL.Path)
-		w.WriteHeader(http.StatusBadRequest)
-		errJSON(w, http.StatusBadRequest, "Something went wrong")
+		log.Printf("Workflow not found: %s", wfID)
+		errJSON(w, http.StatusNotFound, "workflow not found")
 		return
 	}
 
 	if !wf.Enabled {
-		log.Printf("WorkFlow ID: %s disabled", wf.ID)
-		errJSON(w, http.StatusBadRequest, "Something went wrong")
+		log.Printf("Workflow %s is disabled", wf.ID)
+		errJSON(w, http.StatusForbidden, "workflow is disabled")
 		return
 	}
 
-	if r.Method != "POST" {
-		log.Printf("Wrong HTTP trigger method")
-		errJSON(w, http.StatusMethodNotAllowed, "Something went wrong")
-		return
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	var wfCtx WorkFlowCtx
+	if err = json.NewDecoder(r.Body).Decode(&wfCtx); err != nil {
+		wfCtx = WorkFlowCtx{}
 	}
 
-	var ctx WorkFlowCtx
-	if err = json.NewDecoder(r.Body).Decode(&ctx); err != nil {
-		log.Printf("Wrong body form")
-		errJSON(w, http.StatusBadRequest, "Something went wrong")
-		return
-	}
+	for i, step := range wf.Steps {
+		select {
+		case <-ctx.Done():
+			log.Printf("Workflow %s timed out before step %d", wf.ID, i)
+			errJSON(w, http.StatusGatewayTimeout, "workflow timed out")
+			return
+		default:
+		}
 
-	wf.CurrentCtx = ctx
-	for _, fline := range wf.Steps {
-		ctx, err = fline.Execute(wf.CurrentCtx)
+		wfCtx, err = step.Execute(ctx, wfCtx)
 		if err != nil {
-			log.Printf("Error executing step: \n%s\n", err.Error())
-			errJSON(w, http.StatusInternalServerError, "Something went wrong")
+			log.Printf("Step %d failed: %v", i, err)
+			errJSON(w, http.StatusInternalServerError, fmt.Sprintf("step %d failed: %v", i, err))
 			return
 		}
-		wf.CurrentCtx = ctx
+		wf.CurrentCtx = wfCtx
 	}
 
-	log.Printf("Current Context:\n%v\n", ctx)
-	respondJSON(w, http.StatusOK, wf.CurrentCtx)
+	respondJSON(w, http.StatusOK, wfCtx)
 }
 
 func main() {
