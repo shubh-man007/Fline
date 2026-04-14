@@ -44,10 +44,6 @@ type WorkFlowInit struct {
 	Steps json.RawMessage `json:"steps"`
 }
 
-type WorkFlowDisable struct {
-	ID uuid.UUID `json:"id"`
-}
-
 type WorkFlowResponse struct {
 	ID      uuid.UUID         `json:"id"`
 	Name    string            `json:"name"`
@@ -80,6 +76,20 @@ func (ws *WorkFlowStore) DeleteWorkFlow(wfID uuid.UUID) {
 	ws.mu.Unlock()
 
 	log.Printf("[%s] workflow deleted from store", wfID.String())
+}
+
+func (ws *WorkFlowStore) FlipWorkFlow(wfID uuid.UUID) (bool, error) {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	wf, prs := ws.Store[wfID]
+
+	if prs != true {
+		return false, fmt.Errorf("WorkFlow: %s does not exists", wfID.String())
+	}
+
+	wf.Enabled = !wf.Enabled
+	return wf.Enabled, nil
 }
 
 func (ws *WorkFlowStore) GetWorkFlow(wfID uuid.UUID) (*WorkFlow, error) {
@@ -273,7 +283,7 @@ func (ws *WorkFlowStore) CreateWorkflow(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (ws *WorkFlowStore) DisableWorkflow(w http.ResponseWriter, r *http.Request) {
+func (ws *WorkFlowStore) ToggleWorkflow(w http.ResponseWriter, r *http.Request) {
 	wfID, err := uuid.Parse(chi.URLParam(r, "workflowID"))
 	if err != nil {
 		log.Printf("Could not parse workflow ID: %v", err)
@@ -281,16 +291,9 @@ func (ws *WorkFlowStore) DisableWorkflow(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	wf, err := ws.GetWorkFlow(wfID)
-	if err != nil {
-		log.Printf("Workflow: %s not found", wfID)
-		errJSON(w, http.StatusNotFound, "workflow not found")
-		return
-	}
-
-	wf.Enabled = false
-	log.Printf("Workflow %s is disabled", wf.ID)
-	respondJSON(w, http.StatusOK, "workflow disabled")
+	enabled, err := ws.FlipWorkFlow(wfID)
+	log.Printf("Workflow %s is toggled: %v", wfID, enabled)
+	respondJSON(w, http.StatusOK, "workflow toggled")
 }
 
 func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -353,7 +356,7 @@ func main() {
 	r.Get("/", HealthCheck)
 	r.Post("/workflows", store.CreateWorkflow)
 	r.Post("/t/{workflowID}", store.TriggerWorkflow)
-	r.Patch("/workflows/{workflowID}/disable", store.DisableWorkflow)
+	r.Patch("/workflows/{workflowID}/toggle", store.ToggleWorkflow)
 
 	log.Printf("Server running at port:%s\n", PORT)
 	err := http.ListenAndServe(":"+PORT, r)
