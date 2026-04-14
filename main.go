@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,11 +19,6 @@ import (
 )
 
 const PORT = "1324"
-
-// type Hook struct {
-// 	HookCtx     string `json:"context"`
-// 	TriggerPath uuid.UUID `json:"workflow"`
-// }
 
 type WorkFlowCtx map[string]any
 
@@ -48,11 +44,54 @@ type WorkFlowInit struct {
 	Steps json.RawMessage `json:"steps"`
 }
 
+type WorkFlowDisable struct {
+	ID uuid.UUID `json:"id"`
+}
+
 type WorkFlowResponse struct {
 	ID      uuid.UUID         `json:"id"`
 	Name    string            `json:"name"`
 	Enabled bool              `json:"enabled"`
 	Steps   []json.RawMessage `json:"steps"`
+}
+
+type WorkFlowStore struct {
+	mu    sync.RWMutex
+	Store map[uuid.UUID]*WorkFlow
+}
+
+func NewWorkFlowStore() *WorkFlowStore {
+	return &WorkFlowStore{
+		Store: make(map[uuid.UUID]*WorkFlow),
+	}
+}
+
+func (ws *WorkFlowStore) AddWorkFlow(wf *WorkFlow) {
+	ws.mu.Lock()
+	ws.Store[wf.ID] = wf
+	ws.mu.Unlock()
+
+	log.Printf("[%s] workflow added to store", wf.ID.String())
+}
+
+func (ws *WorkFlowStore) DeleteWorkFlow(wfID uuid.UUID) {
+	ws.mu.Lock()
+	delete(ws.Store, wfID)
+	ws.mu.Unlock()
+
+	log.Printf("[%s] workflow deleted from store", wfID.String())
+}
+
+func (ws *WorkFlowStore) GetWorkFlow(wfID uuid.UUID) (*WorkFlow, error) {
+	ws.mu.RLock()
+	wf, prs := ws.Store[wfID]
+	ws.mu.RUnlock()
+
+	if prs != true {
+		return nil, fmt.Errorf("WorkFlow: %s does not exists", wfID.String())
+	}
+
+	return wf, nil
 }
 
 type HTTPRequest struct {
@@ -187,7 +226,7 @@ func HealthCheck(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, Health{Status: "Running"})
 }
 
-func (wf *WorkFlow) CreateWorkflow(w http.ResponseWriter, r *http.Request) {
+func (ws *WorkFlowStore) CreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	var wfReq WorkFlowInit
 	if err := json.NewDecoder(r.Body).Decode(&wfReq); err != nil {
 		log.Printf("Error decoding request: %v\n", err)
@@ -212,10 +251,13 @@ func (wf *WorkFlow) CreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	wf := NewWorkFlow()
 	wf.ID = uuid.New()
 	wf.Name = wfReq.Name
 	wf.Enabled = true
 	wf.Steps = steps
+
+	ws.AddWorkFlow(wf)
 
 	var rawSteps []json.RawMessage
 	if err = json.Unmarshal(wfReq.Steps, &rawSteps); err != nil {
@@ -231,12 +273,7 @@ func (wf *WorkFlow) CreateWorkflow(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (wf *WorkFlow) DisableWorkflow(w http.ResponseWriter, r *http.Request) {
-	wf.Enabled = false
-	respondJSON(w, http.StatusOK, wf)
-}
-
-func (wf *WorkFlow) TriggerWorkflow(w http.ResponseWriter, r *http.Request) {
+func (ws *WorkFlowStore) DisableWorkflow(w http.ResponseWriter, r *http.Request) {
 	wfID, err := uuid.Parse(chi.URLParam(r, "workflowID"))
 	if err != nil {
 		log.Printf("Could not parse workflow ID: %v", err)
@@ -244,8 +281,29 @@ func (wf *WorkFlow) TriggerWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if wfID != wf.ID {
-		log.Printf("Workflow not found: %s", wfID)
+	wf, err := ws.GetWorkFlow(wfID)
+	if err != nil {
+		log.Printf("Workflow: %s not found", wfID)
+		errJSON(w, http.StatusNotFound, "workflow not found")
+		return
+	}
+
+	wf.Enabled = false
+	log.Printf("Workflow %s is disabled", wf.ID)
+	respondJSON(w, http.StatusOK, "workflow disabled")
+}
+
+func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request) {
+	wfID, err := uuid.Parse(chi.URLParam(r, "workflowID"))
+	if err != nil {
+		log.Printf("Could not parse workflow %s: %v", wfID.String(), err)
+		errJSON(w, http.StatusBadRequest, "invalid workflow ID")
+		return
+	}
+
+	wf, err := ws.GetWorkFlow(wfID)
+	if err != nil {
+		log.Printf("Workflow %s not found", wfID)
 		errJSON(w, http.StatusNotFound, "workflow not found")
 		return
 	}
@@ -280,20 +338,22 @@ func (wf *WorkFlow) TriggerWorkflow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		wf.CurrentCtx = wfCtx
+		fmt.Printf("Current Context: %v\n", wf.CurrentCtx)
 	}
 
 	respondJSON(w, http.StatusOK, wfCtx)
 }
 
 func main() {
-	wf := NewWorkFlow()
+	store := NewWorkFlowStore()
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 
 	r.Get("/", HealthCheck)
-	r.Post("/create", wf.CreateWorkflow)
-	r.Post("/t/{workflowID}", wf.TriggerWorkflow)
+	r.Post("/workflows", store.CreateWorkflow)
+	r.Post("/t/{workflowID}", store.TriggerWorkflow)
+	r.Patch("/workflows/{workflowID}/disable", store.DisableWorkflow)
 
 	log.Printf("Server running at port:%s\n", PORT)
 	err := http.ListenAndServe(":"+PORT, r)
@@ -348,3 +408,6 @@ func main() {
 //     }
 //   }
 // }
+
+// curl -X POST "http://localhost:1324/workflows" -H "Content-Type: application/json" -d '{"name":"Random Anime Quote","steps":[{"type":"http_request","method":"GET","URL":"https://api.animechan.io/v1/quotes/random","headers":{"Accept":"application/json"},"timeout":5000,"retries":3}]}'
+// curl -X POST http://localhost:1324/t/fa35033d-2843-4b69-a6e1-9b0df5326a48 -H "Content-Type: application/json" -d '{}'
