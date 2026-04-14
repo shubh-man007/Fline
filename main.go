@@ -292,8 +292,13 @@ func (ws *WorkFlowStore) ToggleWorkflow(w http.ResponseWriter, r *http.Request) 
 	}
 
 	enabled, err := ws.FlipWorkFlow(wfID)
-	log.Printf("Workflow %s is toggled: %v", wfID, enabled)
-	respondJSON(w, http.StatusOK, "workflow toggled")
+	if err != nil {
+		errJSON(w, http.StatusNotFound, "workflow not found")
+		return
+	}
+
+	log.Printf("Workflow %s toggled: enabled=%v", wfID, enabled)
+	respondJSON(w, http.StatusOK, map[string]any{"enabled": enabled})
 }
 
 func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -356,7 +361,7 @@ func main() {
 	r.Get("/", HealthCheck)
 	r.Post("/workflows", store.CreateWorkflow)
 	r.Post("/t/{workflowID}", store.TriggerWorkflow)
-	r.Patch("/workflows/{workflowID}/toggle", store.ToggleWorkflow)
+	r.Post("/workflows/{workflowID}/toggle", store.ToggleWorkflow)
 
 	log.Printf("Server running at port:%s\n", PORT)
 	err := http.ListenAndServe(":"+PORT, r)
