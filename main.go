@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -108,6 +109,7 @@ type HTTPRequest struct {
 	Endpoint string            `json:"URL"`
 	Method   string            `json:"method"`
 	Headers  map[string]string `json:"headers"`
+	Body     map[string]any    `json:"body"`
 	TimeOut  int               `json:"timeout"`
 	Retries  int               `json:"retries"`
 	Client   *http.Client
@@ -116,7 +118,24 @@ type HTTPRequest struct {
 func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowCtx, error) {
 	log.Printf("Executing HTTP step: %s %s\n", h.Method, h.Endpoint)
 
-	req, err := http.NewRequestWithContext(ctx, h.Method, h.Endpoint, nil)
+	var bodyReader io.Reader
+	if h.Body != nil {
+		// static body defined in the step definition
+		b, err := json.Marshal(h.Body)
+		if err != nil {
+			return wfCtx, fmt.Errorf("error marshalling step body: %w", err)
+		}
+		bodyReader = bytes.NewReader(b)
+	} else if len(wfCtx) > 0 && h.Method != "GET" {
+		// no static body, send whatever is in the workflow context
+		b, err := json.Marshal(wfCtx)
+		if err != nil {
+			return wfCtx, fmt.Errorf("error marshalling context body: %w", err)
+		}
+		bodyReader = bytes.NewReader(b)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, h.Method, h.Endpoint, bodyReader)
 	if err != nil {
 		return wfCtx, fmt.Errorf("error building request: %w", err)
 	}
@@ -372,50 +391,6 @@ func main() {
 		os.Exit(1)
 	}
 }
-
-// {
-//   "name": "Random Anime Quote",
-//   "enabled": true,
-//   "trigger": {
-//     "type": "http",
-//     "path": "/t/83064af3-bb81-4514-a6d4-afba340825cd"
-//   },
-//   "steps": [
-//     {
-//       "type": "http_request",
-//       "method": "GET",
-//       "url": "https://api.animechan.io/v1/quotes/random",
-//       "headers": {
-//         "Accept": "application/json"
-//       },
-//       "body": {
-//         "mode": "ctx"
-//       },
-//       "timeoutMs": 5000,
-//       "retries": 3
-//     }
-//   ]
-// }
-
-// https://animechan.io/docs/quote/random-via-anime
-// BASE_URL: https://api.animechan.io/v1   {animechan}
-// curl -v https://api.animechan.io/v1/quotes/random
-
-// {
-//   "status": "success",
-//   "data": {
-//     "content": "I told you before, Komamura. The only paths that I see with these eyes are the ones not dyed with blood. Those paths are the paths to justice. So whichever path I choose...Is justice.",
-//     "anime": {
-//       "id": 222,
-//       "name": "Bleach",
-//       "altName": "Bleach"
-//     },
-//     "character": {
-//       "id": 2143,
-//       "name": "Tousen Kaname"
-//     }
-//   }
-// }
 
 // curl -X POST "http://localhost:1324/workflows" -H "Content-Type: application/json" -d '{"name":"Random Anime Quote","steps":[{"type":"http_request","method":"GET","URL":"https://api.animechan.io/v1/quotes/random","headers":{"Accept":"application/json"},"timeout":5000,"retries":3}]}'
 // curl -X POST http://localhost:1324/t/fa35033d-2843-4b69-a6e1-9b0df5326a48 -H "Content-Type: application/json" -d '{}'
