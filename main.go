@@ -165,6 +165,23 @@ func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowC
 	return wfCtx, nil
 }
 
+type TransformOp string
+
+const (
+	TransformDefault  TransformOp = "default"
+	TransformTemplate TransformOp = "template"
+	TransformPick     TransformOp = "pick"
+)
+
+type Transform struct {
+	Op           TransformOp `json:"op"`
+	DefPath      string      `json:"path"`
+	DefValue     string      `json:"value"`
+	TempTo       string      `json:"to"`
+	TempTemplate string      `json:"Template"`
+	PickPaths    []string    `json:"paths"`
+}
+
 type StepType string
 
 const (
