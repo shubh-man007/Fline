@@ -151,6 +151,11 @@ func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowC
 	}
 	defer res.Body.Close()
 
+	if res.StatusCode >= 400 {
+		body, _ := io.ReadAll(res.Body)
+		return wfCtx, fmt.Errorf("request failed with status %d: %s", res.StatusCode, string(body))
+	}
+
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return wfCtx, fmt.Errorf("error reading response body: %w", err)
