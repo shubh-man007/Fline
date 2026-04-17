@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -168,18 +169,131 @@ func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowC
 type TransformOp string
 
 const (
-	TransformDefault  TransformOp = "default"
-	TransformTemplate TransformOp = "template"
-	TransformPick     TransformOp = "pick"
+	DefaultOp  TransformOp = "default"
+	TemplateOp TransformOp = "template"
+	PickOp     TransformOp = "pick"
 )
 
+type Transformer interface {
+	TransformOperate(WorkFlowCtx) WorkFlowCtx
+}
+
+type TransformDefault struct {
+	Op    TransformOp `json:"op"`
+	Field string      `json:"path"`
+	Value string      `json:"value"`
+}
+
+func (def *TransformDefault) TransformOperate(wfCtx WorkFlowCtx) WorkFlowCtx {
+	_, ok := wfCtx[def.Field]
+	if !ok {
+		wfCtx[def.Field] = def.Value
+		return wfCtx
+	}
+	return wfCtx
+}
+
+type TransformTemplate struct {
+	Op       TransformOp `json:"op"`
+	To       string      `json:"to"`
+	Template string      `json:"template"`
+}
+
+var re = regexp.MustCompile(`{{([^{}]*)}}`)
+
+func (temp *TransformTemplate) TransformOperate(wfCtx WorkFlowCtx) WorkFlowCtx {
+	result := temp.Template
+	matches := re.FindAllStringSubmatch(temp.Template, -1)
+
+	for _, match := range matches {
+		placeholder := match[0]
+		key := strings.TrimSpace(match[1])
+
+		val, ok := wfCtx[key]
+		if !ok || val == nil {
+			result = strings.ReplaceAll(result, placeholder, "")
+			continue
+		}
+		result = strings.ReplaceAll(result, placeholder, fmt.Sprintf("%v", val))
+	}
+
+	wfCtx[temp.To] = result
+	return wfCtx
+}
+
+type TransformPick struct {
+	Op     TransformOp `json:"op"`
+	Fields []string    `json:"paths"`
+}
+
+func (pick *TransformPick) TransformOperate(wfCtx WorkFlowCtx) WorkFlowCtx {
+	tempCtx := make(WorkFlowCtx)
+	for _, key := range pick.Fields {
+		if val, ok := wfCtx[key]; ok {
+			tempCtx[key] = val
+		}
+	}
+	return tempCtx
+}
+
 type Transform struct {
-	Op           TransformOp `json:"op"`
-	DefPath      string      `json:"path"`
-	DefValue     string      `json:"value"`
-	TempTo       string      `json:"to"`
-	TempTemplate string      `json:"Template"`
-	PickPaths    []string    `json:"paths"`
+	Ops []Transformer `json:"-"`
+}
+
+func (t *Transform) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowCtx, error) {
+	for _, tstep := range t.Ops {
+		wfCtx = tstep.TransformOperate(wfCtx)
+	}
+
+	return wfCtx, nil
+}
+
+type OpDiscriminator struct {
+	Op TransformOp `json:"op"`
+}
+
+func ParseOps(raw json.RawMessage) ([]Transformer, error) {
+	var rawOps []json.RawMessage
+	if err := json.Unmarshal(raw, &rawOps); err != nil {
+		return nil, fmt.Errorf("ops must be a JSON array: %w", err)
+	}
+
+	ops := make([]Transformer, 0, len(rawOps))
+
+	for i, rawOp := range rawOps {
+		var disc OpDiscriminator
+		if err := json.Unmarshal(rawOp, &disc); err != nil {
+			return nil, fmt.Errorf("op[%d]: missing or invalid op: %w", i, err)
+		}
+
+		var op Transformer
+		var err error
+
+		switch disc.Op {
+		case DefaultOp:
+			var o TransformDefault
+			err = json.Unmarshal(rawOp, &o)
+			op = &o
+		case TemplateOp:
+			var o TransformTemplate
+			err = json.Unmarshal(rawOp, &o)
+			op = &o
+		case PickOp:
+			var o TransformPick
+			err = json.Unmarshal(rawOp, &o)
+			op = &o
+		default:
+			return nil, fmt.Errorf("op[%d]: unknown op %q", i, disc.Op)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("op[%d] (%s): parse error: %w", i, disc.Op, err)
+		}
+
+		ops = append(ops, op)
+	}
+
+	return ops, nil
 }
 
 type StepType string
@@ -225,14 +339,22 @@ func ParseSteps(raw json.RawMessage) ([]Fliner, error) {
 			}
 			s.Client = &http.Client{Timeout: time.Duration(s.TimeOut) * time.Millisecond}
 			step = &s
-		// case StepTypeFilter:
-		// 	var s FilterStep
-		// 	err = json.Unmarshal(rawStep, &s)
-		// 	step = &s
-		// case StepTypeTransform:
-		// 	var s TransformStep
-		// 	err = json.Unmarshal(rawStep, &s)
-		// 	step = &s
+
+		case StepTypeTransform:
+			var rawTransform struct {
+				Ops json.RawMessage `json:"ops"`
+			}
+			if err = json.Unmarshal(rawStep, &rawTransform); err != nil {
+				return nil, fmt.Errorf("step[%d]: invalid transform: %w", i, err)
+			}
+
+			var ops []Transformer
+			ops, err = ParseOps(rawTransform.Ops)
+			if err != nil {
+				return nil, fmt.Errorf("step[%d]: %w", i, err)
+			}
+			step = &Transform{Ops: ops}
+
 		default:
 			return nil, fmt.Errorf("step[%d]: unknown type %q", i, disc.Type)
 		}
@@ -382,7 +504,7 @@ func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		wf.CurrentCtx = wfCtx
-		fmt.Printf("Current Context: %v\n", wf.CurrentCtx)
+		log.Printf("Current Context: %v\n", wf.CurrentCtx)
 	}
 
 	respondJSON(w, http.StatusOK, wfCtx)
@@ -408,6 +530,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-
-// curl -X POST "http://localhost:1324/workflows" -H "Content-Type: application/json" -d '{"name":"Random Anime Quote","steps":[{"type":"http_request","method":"GET","URL":"https://api.animechan.io/v1/quotes/random","headers":{"Accept":"application/json"},"timeout":5000,"retries":3}]}'
-// curl -X POST http://localhost:1324/t/fa35033d-2843-4b69-a6e1-9b0df5326a48 -H "Content-Type: application/json" -d '{}'
