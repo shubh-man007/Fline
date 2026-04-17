@@ -26,6 +26,22 @@ curl -v https://api.animechan.io/v1/quotes/random
 ```
 
 ## Create Workflow
+```bash
+curl -X POST "http://localhost:1324/workflows" \
+-H "Content-Type: application/json" \
+-d '{"name":"Random Anime Quote",
+    "steps":[
+        {"type":"http_request",
+         "method":"GET",
+         "URL":"https://api.animechan.io/v1/quotes/random",
+         "headers":{"Accept":"application/json"},
+         "timeout":5000,
+         "retries":3
+        }
+    ]
+}'
+```
+
 ```json
 {
     "name":"Random Anime Quote",
@@ -43,6 +59,10 @@ curl -v https://api.animechan.io/v1/quotes/random
 ```
 
 ## Trigger Workflow
+```bash
+curl -X POST http://localhost:1324/t/fa35033d-2843-4b69-a6e1-9b0df5326a48 -H "Content-Type: application/json" -d '{}'
+```
+
 ```json
 {
     "id": "22e0ce3c-f316-4766-aacf-76d1922841a3",
