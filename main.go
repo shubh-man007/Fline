@@ -509,7 +509,7 @@ func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		wf.CurrentCtx = wfCtx
-		log.Printf("Current Context: %v\n", wf.CurrentCtx)
+		log.Printf("[CONTEXT]: %v\n", wf.CurrentCtx)
 	}
 
 	respondJSON(w, http.StatusOK, wfCtx)
