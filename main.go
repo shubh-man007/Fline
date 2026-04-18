@@ -509,7 +509,8 @@ func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		wf.CurrentCtx = wfCtx
-		log.Printf("[CONTEXT]: %v\n", wf.CurrentCtx)
+		b, _ := json.MarshalIndent(wf.CurrentCtx, "", "  ")
+		log.Printf("[CONTEXT]:\n%s\n", b)
 	}
 
 	respondJSON(w, http.StatusOK, wfCtx)
