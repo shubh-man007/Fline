@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,48 @@ import (
 )
 
 const PORT = "1324"
+
+var re = regexp.MustCompile(`{{([^{}]*)}}`)
+
+func getByPath(data any, path string) any {
+	parts := strings.SplitN(path, ".", 2)
+	key := parts[0]
+
+	switch v := data.(type) {
+	case map[string]any:
+		val, ok := v[key]
+		if !ok {
+			return nil
+		}
+		if len(parts) == 1 {
+			return val
+		}
+		return getByPath(val, parts[1])
+
+	case []any:
+		idx, err := strconv.Atoi(key)
+		if err != nil || idx < 0 || idx >= len(v) {
+			return nil
+		}
+		if len(parts) == 1 {
+			return v[idx]
+		}
+		return getByPath(v[idx], parts[1])
+	}
+
+	return nil
+}
+
+func resolveTemplate(template string, wfCtx WorkFlowCtx) string {
+	return re.ReplaceAllStringFunc(template, func(match string) string {
+		key := strings.TrimSpace(match[2 : len(match)-2])
+		val := getByPath(map[string]any(wfCtx), key)
+		if val == nil {
+			return ""
+		}
+		return fmt.Sprintf("%v", val)
+	})
+}
 
 type WorkFlowCtx map[string]any
 
@@ -81,8 +124,8 @@ func (ws *WorkFlowStore) DeleteWorkFlow(wfID uuid.UUID) {
 }
 
 func (ws *WorkFlowStore) FlipWorkFlow(wfID uuid.UUID) (bool, error) {
-	ws.mu.RLock()
-	defer ws.mu.RUnlock()
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
 
 	wf, prs := ws.Store[wfID]
 
@@ -117,18 +160,18 @@ type HTTPRequest struct {
 }
 
 func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowCtx, error) {
-	log.Printf("Executing HTTP step: %s %s\n", h.Method, h.Endpoint)
+	endpoint := resolveTemplate(h.Endpoint, wfCtx)
+	log.Printf("Executing HTTP step: %s %s\n", h.Method, endpoint)
 
 	var bodyReader io.Reader
 	if h.Body != nil {
-		// static body defined in the step definition
 		b, err := json.Marshal(h.Body)
 		if err != nil {
 			return wfCtx, fmt.Errorf("error marshalling step body: %w", err)
 		}
-		bodyReader = bytes.NewReader(b)
+		resolved := resolveTemplate(string(b), wfCtx)
+		bodyReader = strings.NewReader(resolved)
 	} else if len(wfCtx) > 0 && h.Method != "GET" {
-		// no static body, send whatever is in the workflow context
 		b, err := json.Marshal(wfCtx)
 		if err != nil {
 			return wfCtx, fmt.Errorf("error marshalling context body: %w", err)
@@ -136,13 +179,13 @@ func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowC
 		bodyReader = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, h.Method, h.Endpoint, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, h.Method, endpoint, bodyReader)
 	if err != nil {
 		return wfCtx, fmt.Errorf("error building request: %w", err)
 	}
 
 	for k, v := range h.Headers {
-		req.Header.Add(k, v)
+		req.Header.Add(k, resolveTemplate(v, wfCtx))
 	}
 
 	res, err := h.Client.Do(req)
@@ -162,10 +205,15 @@ func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowC
 	}
 
 	var parsed WorkFlowCtx
-	if err = json.Unmarshal(body, &parsed); err != nil {
-		wfCtx["result"] = string(body)
-	} else {
+	if err = json.Unmarshal(body, &parsed); err == nil {
 		wfCtx["result"] = parsed
+	} else {
+		var parsedArray []any
+		if err = json.Unmarshal(body, &parsedArray); err == nil {
+			wfCtx["result"] = parsedArray
+		} else {
+			wfCtx["result"] = string(body)
+		}
 	}
 
 	return wfCtx, nil
@@ -204,8 +252,6 @@ type TransformTemplate struct {
 	Template string      `json:"template"`
 }
 
-var re = regexp.MustCompile(`{{([^{}]*)}}`)
-
 func (temp *TransformTemplate) TransformOperate(wfCtx WorkFlowCtx) WorkFlowCtx {
 	result := temp.Template
 	matches := re.FindAllStringSubmatch(temp.Template, -1)
@@ -214,8 +260,8 @@ func (temp *TransformTemplate) TransformOperate(wfCtx WorkFlowCtx) WorkFlowCtx {
 		placeholder := match[0]
 		key := strings.TrimSpace(match[1])
 
-		val, ok := wfCtx[key]
-		if !ok || val == nil {
+		val := getByPath(map[string]any(wfCtx), key)
+		if val == nil {
 			result = strings.ReplaceAll(result, placeholder, "")
 			continue
 		}
