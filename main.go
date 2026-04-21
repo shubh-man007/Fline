@@ -26,35 +26,6 @@ const PORT = "1324"
 
 var re = regexp.MustCompile(`{{([^{}]*)}}`)
 
-// func getByPath(data any, path string) any {
-// 	parts := strings.SplitN(path, ".", 2)
-// 	key := parts[0]
-
-// 	switch v := data.(type) {
-// 	case map[string]any:
-// 		val, ok := v[key]
-// 		if !ok {
-// 			return nil
-// 		}
-// 		if len(parts) == 1 {
-// 			return val
-// 		}
-// 		return getByPath(val, parts[1])
-
-// 	case []any:
-// 		idx, err := strconv.Atoi(key)
-// 		if err != nil || idx < 0 || idx >= len(v) {
-// 			return nil
-// 		}
-// 		if len(parts) == 1 {
-// 			return v[idx]
-// 		}
-// 		return getByPath(v[idx], parts[1])
-// 	}
-
-// 	return nil
-// }
-
 func getByPath(data any, path string) any {
 	parts := strings.SplitN(path, ".", 2)
 	key := parts[0]
@@ -381,6 +352,75 @@ func ParseOps(raw json.RawMessage) ([]Transformer, error) {
 	return ops, nil
 }
 
+type FilterOp string
+
+const (
+	EqOp  FilterOp = "eq"
+	NeqOp FilterOp = "neq"
+)
+
+type FilterStep struct {
+	Field string   `json:"path"`
+	Op    FilterOp `json:"op"`
+	Value any      `json:"value"`
+}
+
+func normalize(v any) string {
+	if v == nil {
+		return "null"
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+func (fs *FilterStep) checkCondition(wfCtx WorkFlowCtx) bool {
+	v := getByPath(map[string]any(wfCtx), fs.Field)
+
+	switch fs.Op {
+	case EqOp:
+		return normalize(v) == normalize(fs.Value)
+	case NeqOp:
+		return normalize(v) != normalize(fs.Value)
+	default:
+		log.Printf("Operation does not exist: %s\n", fs.Op)
+		return true
+	}
+}
+
+type Filter struct {
+	Conditions []FilterStep
+}
+
+var ErrSkipped = errors.New("workflow skipped")
+
+func (f *Filter) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowCtx, error) {
+	for _, fs := range f.Conditions {
+		if !fs.checkCondition(wfCtx) {
+			return wfCtx, ErrSkipped
+		}
+	}
+	return wfCtx, nil
+}
+
+func ParseConditions(raw json.RawMessage) ([]FilterStep, error) {
+	var rawConds []json.RawMessage
+	if err := json.Unmarshal(raw, &rawConds); err != nil {
+		return nil, fmt.Errorf("ops must be a JSON array: %w", err)
+	}
+
+	conds := make([]FilterStep, 0, len(rawConds))
+
+	for i, cond := range rawConds {
+		var filter FilterStep
+		err := json.Unmarshal(cond, &filter)
+		if err != nil {
+			return nil, fmt.Errorf("condition[%d] parse error: %w", i, err)
+		}
+		conds = append(conds, filter)
+	}
+
+	return conds, nil
+}
+
 type StepType string
 
 const (
@@ -439,6 +479,21 @@ func ParseSteps(raw json.RawMessage) ([]Fliner, error) {
 				return nil, fmt.Errorf("step[%d]: %w", i, err)
 			}
 			step = &Transform{Ops: ops}
+
+		case StepTypeFilter:
+			var rawFilter struct {
+				Conditions json.RawMessage `json:"conditions"`
+			}
+			if err = json.Unmarshal(rawStep, &rawFilter); err != nil {
+				return nil, fmt.Errorf("step[%d]: invalid filter: %w", i, err)
+			}
+
+			var conds []FilterStep
+			conds, err = ParseConditions(rawFilter.Conditions)
+			if err != nil {
+				return nil, fmt.Errorf("step[%d]: %w", i, err)
+			}
+			step = &Filter{Conditions: conds}
 
 		default:
 			return nil, fmt.Errorf("step[%d]: unknown type %q", i, disc.Type)
@@ -584,13 +639,22 @@ func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request)
 
 		wfCtx, err = step.Execute(ctx, wfCtx)
 		if err != nil {
+			if errors.Is(err, ErrSkipped) {
+				log.Printf("Workflow %s skipped at step %d", wf.ID, i)
+				respondJSON(w, http.StatusOK, map[string]any{
+					"status":    "skipped",
+					"stoppedAt": i,
+				})
+				return
+			}
 			log.Printf("Step %d failed: %v", i, err)
 			errJSON(w, http.StatusInternalServerError, fmt.Sprintf("step %d failed: %v", i, err))
 			return
 		}
+
 		// wf.CurrentCtx = wfCtx
 		b, _ := json.MarshalIndent(wfCtx, "", "  ")
-		log.Printf("[CONTEXT]:\n%s\n", b)
+		log.Printf("\n[CONTEXT]:\n%s\n", b)
 	}
 
 	respondJSON(w, http.StatusOK, wfCtx)
