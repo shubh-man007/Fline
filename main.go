@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"regexp"
@@ -25,6 +26,35 @@ const PORT = "1324"
 
 var re = regexp.MustCompile(`{{([^{}]*)}}`)
 
+// func getByPath(data any, path string) any {
+// 	parts := strings.SplitN(path, ".", 2)
+// 	key := parts[0]
+
+// 	switch v := data.(type) {
+// 	case map[string]any:
+// 		val, ok := v[key]
+// 		if !ok {
+// 			return nil
+// 		}
+// 		if len(parts) == 1 {
+// 			return val
+// 		}
+// 		return getByPath(val, parts[1])
+
+// 	case []any:
+// 		idx, err := strconv.Atoi(key)
+// 		if err != nil || idx < 0 || idx >= len(v) {
+// 			return nil
+// 		}
+// 		if len(parts) == 1 {
+// 			return v[idx]
+// 		}
+// 		return getByPath(v[idx], parts[1])
+// 	}
+
+// 	return nil
+// }
+
 func getByPath(data any, path string) any {
 	parts := strings.SplitN(path, ".", 2)
 	key := parts[0]
@@ -33,6 +63,7 @@ func getByPath(data any, path string) any {
 	case map[string]any:
 		val, ok := v[key]
 		if !ok {
+			log.Printf("[getByPath] key %q not found in map, available keys: %v", key, maps.Keys(v))
 			return nil
 		}
 		if len(parts) == 1 {
@@ -43,15 +74,18 @@ func getByPath(data any, path string) any {
 	case []any:
 		idx, err := strconv.Atoi(key)
 		if err != nil || idx < 0 || idx >= len(v) {
+			log.Printf("[getByPath] invalid array index %q for slice of len %d", key, len(v))
 			return nil
 		}
 		if len(parts) == 1 {
 			return v[idx]
 		}
 		return getByPath(v[idx], parts[1])
-	}
 
-	return nil
+	default:
+		log.Printf("[getByPath] unexpected type %T at path segment %q", data, key)
+		return nil
+	}
 }
 
 func resolveTemplate(template string, wfCtx WorkFlowCtx) string {
@@ -204,7 +238,7 @@ func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowC
 		return wfCtx, fmt.Errorf("error reading response body: %w", err)
 	}
 
-	var parsed WorkFlowCtx
+	var parsed map[string]any
 	if err = json.Unmarshal(body, &parsed); err == nil {
 		wfCtx["result"] = parsed
 	} else {
@@ -554,8 +588,8 @@ func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request)
 			errJSON(w, http.StatusInternalServerError, fmt.Sprintf("step %d failed: %v", i, err))
 			return
 		}
-		wf.CurrentCtx = wfCtx
-		b, _ := json.MarshalIndent(wf.CurrentCtx, "", "  ")
+		// wf.CurrentCtx = wfCtx
+		b, _ := json.MarshalIndent(wfCtx, "", "  ")
 		log.Printf("[CONTEXT]:\n%s\n", b)
 	}
 
