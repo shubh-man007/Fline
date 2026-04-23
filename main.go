@@ -591,7 +591,11 @@ func (ws *WorkFlowStore) ToggleWorkflow(w http.ResponseWriter, r *http.Request) 
 
 	enabled, err := ws.FlipWorkFlow(wfID)
 	if err != nil {
-		errJSON(w, http.StatusNotFound, "workflow not found")
+		errJSON(w, http.StatusNotFound, map[string]any{
+			"status":  "Not found",
+			"step":    "NA",
+			"details": fmt.Sprintf("Workflow %s not found", wfID),
+		})
 		return
 	}
 
@@ -610,13 +614,21 @@ func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request)
 	wf, err := ws.GetWorkFlow(wfID)
 	if err != nil {
 		log.Printf("Workflow %s not found", wfID)
-		errJSON(w, http.StatusNotFound, "workflow not found")
+		errJSON(w, http.StatusNotFound, map[string]any{
+			"status":  "Not found",
+			"step":    "NA",
+			"details": fmt.Sprintf("Workflow %s not found", wfID),
+		})
 		return
 	}
 
 	if !wf.Enabled {
 		log.Printf("Workflow %s is disabled", wf.ID)
-		errJSON(w, http.StatusForbidden, "workflow is disabled")
+		errJSON(w, http.StatusForbidden, map[string]any{
+			"status":  "Disable",
+			"step":    "NA",
+			"details": fmt.Sprintf("Workflow %s is disabled", wf.ID),
+		})
 		return
 	}
 
@@ -632,7 +644,11 @@ func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request)
 		select {
 		case <-ctx.Done():
 			log.Printf("Workflow %s timed out before step %d", wf.ID, i)
-			errJSON(w, http.StatusGatewayTimeout, "workflow timed out")
+			errJSON(w, http.StatusGatewayTimeout, map[string]any{
+				"status":  "Timeout",
+				"step":    i,
+				"details": fmt.Sprintf("Workflow %s timed out before step %d", wf.ID, i),
+			})
 			return
 		default:
 		}
@@ -642,13 +658,18 @@ func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request)
 			if errors.Is(err, ErrSkipped) {
 				log.Printf("Workflow %s skipped at step %d", wf.ID, i)
 				respondJSON(w, http.StatusOK, map[string]any{
-					"status":    "skipped",
-					"stoppedAt": i,
+					"status":  "skipped",
+					"step":    i,
+					"details": fmt.Sprintf("Workflow %s skipped at step %d", wf.ID, i),
 				})
 				return
 			}
 			log.Printf("Step %d failed: %v", i, err)
-			errJSON(w, http.StatusInternalServerError, fmt.Sprintf("step %d failed: %v", i, err))
+			errJSON(w, http.StatusInternalServerError, map[string]any{
+				"status":  "failed",
+				"step":    i,
+				"details": err.Error(),
+			})
 			return
 		}
 
