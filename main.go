@@ -73,7 +73,7 @@ func resolveTemplate(template string, wfCtx WorkFlowCtx) string {
 type WorkFlowCtx map[string]any
 
 type Fliner interface {
-	Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowCtx, error)
+	Execute(ctx context.Context, wfCtx WorkFlowCtx, stepIndex int) (WorkFlowCtx, error)
 	// GetContext()
 }
 
@@ -164,7 +164,7 @@ type HTTPRequest struct {
 	Client   *http.Client
 }
 
-func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowCtx, error) {
+func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx, stepIndex int) (WorkFlowCtx, error) {
 	endpoint := resolveTemplate(h.Endpoint, wfCtx)
 	log.Printf("Executing HTTP step: %s %s\n", h.Method, endpoint)
 
@@ -211,13 +211,13 @@ func (h *HTTPRequest) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowC
 
 	var parsed map[string]any
 	if err = json.Unmarshal(body, &parsed); err == nil {
-		wfCtx["result"] = parsed
+		wfCtx[fmt.Sprintf("step_%d", stepIndex)] = parsed
 	} else {
 		var parsedArray []any
 		if err = json.Unmarshal(body, &parsedArray); err == nil {
-			wfCtx["result"] = parsedArray
+			wfCtx[fmt.Sprintf("step_%d", stepIndex)] = parsedArray
 		} else {
-			wfCtx["result"] = string(body)
+			wfCtx[fmt.Sprintf("step_%d", stepIndex)] = string(body)
 		}
 	}
 
@@ -296,7 +296,7 @@ type Transform struct {
 	Ops []Transformer `json:"-"`
 }
 
-func (t *Transform) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowCtx, error) {
+func (t *Transform) Execute(ctx context.Context, wfCtx WorkFlowCtx, _ int) (WorkFlowCtx, error) {
 	for _, tstep := range t.Ops {
 		wfCtx = tstep.TransformOperate(wfCtx)
 	}
@@ -392,7 +392,7 @@ type Filter struct {
 
 var ErrSkipped = errors.New("workflow skipped")
 
-func (f *Filter) Execute(ctx context.Context, wfCtx WorkFlowCtx) (WorkFlowCtx, error) {
+func (f *Filter) Execute(ctx context.Context, wfCtx WorkFlowCtx, _ int) (WorkFlowCtx, error) {
 	for _, fs := range f.Conditions {
 		if !fs.checkCondition(wfCtx) {
 			return wfCtx, ErrSkipped
@@ -653,7 +653,7 @@ func (ws *WorkFlowStore) TriggerWorkflow(w http.ResponseWriter, r *http.Request)
 		default:
 		}
 
-		wfCtx, err = step.Execute(ctx, wfCtx)
+		wfCtx, err = step.Execute(ctx, wfCtx, i)
 		if err != nil {
 			if errors.Is(err, ErrSkipped) {
 				log.Printf("Workflow %s skipped at step %d", wf.ID, i)
